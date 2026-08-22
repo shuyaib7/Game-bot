@@ -1,0 +1,133 @@
+const { Client, GatewayIntentBits, SlashCommandBuilder, REST, Routes, PermissionFlagsBits } = require('discord.js');
+const { joinVoiceChannel, getVoiceConnection } = require('@discordjs/voice');
+const { GiveawaysManager } = require('discord-giveaways');
+require('dotenv').config();
+
+const client = new Client({
+    intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent,
+        GatewayIntentBits.GuildVoiceStates,
+        GatewayIntentBits.GuildMembers,
+        GatewayIntentBits.GuildInvites
+    ]
+});
+
+// ইনভাইট ট্র্যাক করার জন্য ক্যাশ
+const invitesCache = new Map();
+
+// গিভওয়ে ম্যানেজার সেটআপ
+client.giveawaysManager = new GiveawaysManager(client, {
+    storage: './giveaways.json',
+    default: {
+        botsCanWin: false,
+        embedColor: '#2b2d31',
+        reaction: '🎉'
+    }
+});
+
+// স্ল্যাশ কমান্ড ডিফাইন করা
+const commands = [
+    new SlashCommandBuilder().setName('send').setDescription('Send a custom message').addStringOption(option => option.name('message').setDescription('The message to send').setRequired(true)),
+    new SlashCommandBuilder().setName('join').setDescription('Join your voice channel'),
+    new SlashCommandBuilder().setName('left').setDescription('Leave the voice channel'),
+    new SlashCommandBuilder().setName('giveaway-create').setDescription('Start a giveaway').addStringOption(o => o.name('duration').setDescription('Duration (e.g. 1m, 1h)').setRequired(true)).addIntegerOption(o => o.name('winners').setDescription('Number of winners').setRequired(true)).addStringOption(o => o.name('prize').setDescription('The prize').setRequired(true)),
+    new SlashCommandBuilder().setName('giveaway-reroll').setDescription('Reroll a giveaway').addStringOption(o => o.name('message-id').setDescription('Giveaway message ID').setRequired(true)),
+    new SlashCommandBuilder().setName('invites').setDescription('Check your invite count'),
+    new SlashCommandBuilder().setName('leaderboard-invites').setDescription('Check invite leaderboard'),
+    new SlashCommandBuilder().setName('kick').setDescription('Kick a member').addUserOption(o => o.name('target').setDescription('Member to kick').setRequired(true)).setDefaultMemberPermissions(PermissionFlagsBits.KickMembers),
+    new SlashCommandBuilder().setName('ban').setDescription('Ban a member').addUserOption(o => o.name('target').setDescription('Member to ban').setRequired(true)).setDefaultMemberPermissions(PermissionFlagsBits.BanMembers),
+    new SlashCommandBuilder().setName('timeout').setDescription('Timeout a member').addUserOption(o => o.name('target').setDescription('Member').setRequired(true)).addIntegerOption(o => o.name('minutes').setDescription('Minutes').setRequired(true)).setDefaultMemberPermissions(PermissionFlagsBits.ModerateMembers)
+].map(command => command.toJSON());
+
+client.once('ready', async () => {
+    console.log(`Bot logged in as ${client.user.tag}`);
+
+    // ডিসকর্ডে স্ল্যাশ কমান্ড রেজিস্টার করা
+    const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
+    try {
+        await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
+        console.log('Successfully registered application commands.');
+    } catch (error) {
+        console.error(error);
+    }
+
+    // সার্ভারের ইনভাইট ক্যাশ করা
+    client.guilds.cache.forEach(async guild => {
+        const firstInvites = await guild.invites.fetch().catch(() => {});
+        if (firstInvites) invitesCache.set(guild.id, firstInvites);
+    });
+});
+
+// কমান্ড এক্সিকিউশন হ্যান্ডলার
+client.on('interactionCreate', async interaction => {
+    if (!interaction.isChatInputCommand()) return;
+
+    const { commandName } = interaction;
+
+    if (commandName === 'send') {
+        const msg = interaction.options.getString('message');
+        await interaction.channel.send(msg);
+        await interaction.reply({ content: 'Message sent!', ephemeral: true });
+    } 
+    else if (commandName === 'join') {
+        const channel = interaction.member.voice.channel;
+        if (!channel) return interaction.reply({ content: 'Apni kono voice channel-e নেই!', ephemeral: true });
+        
+        joinVoiceChannel({
+            channelId: channel.id,
+            guildId: channel.guild.id,
+            adapterCreator: channel.guild.voiceAdapterCreator,
+        });
+        await interaction.reply('Voice channel-e join korechi!');
+    } 
+    else if (commandName === 'left') {
+        const connection = getVoiceConnection(interaction.guild.id);
+        if (!connection) return interaction.reply({ content: 'Bot kono voice channel-e নেই!', ephemeral: true });
+        
+        connection.destroy();
+        await interaction.reply('Voice channel theke berhye gechi!');
+    }
+    else if (commandName === 'giveaway-create') {
+        const duration = interaction.options.getString('duration');
+        const winnerCount = interaction.options.getInteger('winners');
+        const prize = interaction.options.getString('prize');
+
+        client.giveawaysManager.start(interaction.channel, {
+            duration: ms(duration) || 60000,
+            winnerCount,
+            prize,
+            hostedBy: interaction.user
+        });
+        await interaction.reply({ content: 'Giveaway shuru hoyeche!', ephemeral: true });
+    }
+    else if (commandName === 'giveaway-reroll') {
+        const messageId = interaction.options.getString('message-id');
+        client.giveawaysManager.reroll(messageId).then(() => {
+            interaction.reply({ content: 'Giveaway reroll kora hoyeche!', ephemeral: true });
+        }).catch(() => {
+            interaction.reply({ content: 'Giveaway pawa jayni!', ephemeral: true });
+        });
+    }
+    else if (commandName === 'kick') {
+        const target = interaction.options.getMember('target');
+        if (!target.kickable) return interaction.reply({ content: 'Ei member-ke kick kora jabe na!', ephemeral: true });
+        await target.kick();
+        await interaction.reply(`${target.user.tag}-ke kick kora hoyeche.`);
+    }
+    else if (commandName === 'ban') {
+        const target = interaction.options.getMember('target');
+        if (!target.bannable) return interaction.reply({ content: 'Ei member-ke ban kora jabe na!', ephemeral: true });
+        await target.ban();
+        await interaction.reply(`${target.user.tag}-ke ban kora hoyeche.`);
+    }
+    else if (commandName === 'timeout') {
+        const target = interaction.options.getMember('target');
+        const minutes = interaction.options.getInteger('minutes');
+        await target.timeout(minutes * 60 * 1000, 'Timed out by command');
+        await interaction.reply(`${target.user.tag}-ke ${minutes} minutes-er jonno timeout kora hoyeche.`);
+    }
+});
+
+client.login(process.env.TOKEN);
